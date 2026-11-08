@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: slobos-afk-bot
+    runtime: node
+    plan: free
+    startCommand: node index.js
+    autoDeploy: true
