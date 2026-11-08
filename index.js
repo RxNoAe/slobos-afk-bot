@@ -1855,33 +1855,153 @@ function bedModule(bot, mcData) {
 const aiLastReply = new Map();
 const aiConversations = new Set();
 const aiStopRe = /\b(stop|stop it|stop talking|stop replying|shut up|shut it|shh|quiet|stfu|leave me alone|go away|enough)\b/;
+const AI_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "get_time",
+      description: "Get the current date and time in a timezone or city.",
+      parameters: {
+        type: "object",
+        properties: {
+          timezone: { type: "string", description: "IANA timezone (e.g. Asia/Kolkata) or city (e.g. Mumbai)" },
+        },
+        required: ["timezone"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_weather",
+      description: "Get the current weather for a city.",
+      parameters: {
+        type: "object",
+        properties: { location: { type: "string", description: "City name" } },
+        required: ["location"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "web_search",
+      description: "Search the live internet for current information, news, facts, prices, scores, or anything you are unsure about.",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string", description: "The search query" } },
+        required: ["query"],
+      },
+    },
+  },
+];
+
+const CITY_TZ = {
+  mumbai: "Asia/Kolkata", delhi: "Asia/Kolkata", india: "Asia/Kolkata", kolkata: "Asia/Kolkata",
+  london: "Europe/London", "new york": "America/New_York", tokyo: "Asia/Tokyo", paris: "Europe/Paris",
+  dubai: "Asia/Dubai", sydney: "Australia/Sydney", la: "America/Los_Angeles", "los angeles": "America/Los_Angeles",
+}
+
+async function httpText(url, timeout) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { "User-Agent": "Mozilla/5.0 (Linux; Android 12) JarvisBot/1.0" },
+    });
+    return await res.text();
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+async function runAiTool(name, args) {
+  try {
+    if (name === "get_time") {
+      let tz = String(args.timezone || "").trim();
+      if (CITY_TZ[tz.toLowerCase()]) tz = CITY_TZ[tz.toLowerCase()];
+      try {
+        const s = new Intl.DateTimeFormat("en-GB", { timeZone: tz || "UTC", dateStyle: "full", timeStyle: "short" }).format(new Date());
+        return `Current date/time${tz ? " in " + tz : ""}: ${s}`;
+      } catch (e) {
+        return `Unknown timezone "${args.timezone}". Use an IANA name like Asia/Kolkata.`;
+      }
+    }
+    if (name === "get_weather") {
+      const loc = String(args.location || "").trim();
+      if (!loc) return "No location given.";
+      const raw = await httpText(`https://wttr.in/${encodeURIComponent(loc)}?format=j1`, 12000);
+      const d = JSON.parse(raw);
+      const c = d.current_condition && d.current_condition[0];
+      if (!c) return `No weather data for ${loc}.`;
+      return `Weather in ${loc}: ${(c.weatherDesc && c.weatherDesc[0] && c.weatherDesc[0].value) || ""}, ${c.temp_C}C (feels ${c.FeelsLikeC}C), humidity ${c.humidity}%, wind ${c.windspeedKmph} km/h.`;
+    }
+    if (name === "web_search") {
+      const q = String(args.query || "").trim();
+      if (!q) return "No query given.";
+      const raw = await httpText(`https://r.jina.ai/https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, 28000);
+      let txt = raw.split("Markdown Content:").pop() || raw;
+      txt = txt.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\s+/g, " ").trim().slice(0, 1400);
+      return txt || "No results found.";
+    }
+    return `Unknown tool ${name}`;
+  } catch (e) {
+    return `Tool ${name} failed: ${e.message}`;
+  }
+}
+
 async function aiReply(bot, username, message) {
   try {
     let question = message.replace(new RegExp(config.ai.trigger, "gi"), "").trim();
     if (!question) question = "hi";
-    const persona = config.ai.prompt || "You are a friendly Minecraft player having casual chat in game. Keep replies very short (under 200 characters), playful, no emojis, no markdown.";
+    const persona =
+      (config.ai.prompt || "You are Jarvis, a calm, witty and polite AI assistant. Keep replies short (under 200 characters), plain text, no markdown, no emojis.") +
+      " You DO have live internet access via the tools get_time, get_weather and web_search - always call them for time, weather, news or current/factual questions instead of claiming you cannot access the internet.";
     const baseUrl = config.ai.baseUrl || "https://opencode.ai/zen/v1/chat/completions";
-    const res = await fetch(baseUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.ai.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.ai.model || "glm-5.3-flash-free",
-        messages: [
-          { role: "system", content: persona },
-          { role: "user", content: `${username} says to you in Minecraft chat: ${question}` },
-        ],
-        max_tokens: 100,
-      }),
-    });
-    const data = await res.json();
-    let reply = data?.choices?.[0]?.message?.content;
-    if (!reply) {
-      addLog("[AI] No reply from API:", JSON.stringify(data?.error || data).slice(0, 200));
-      return;
+    const messages = [
+      { role: "system", content: persona },
+      { role: "user", content: `${username} says: ${question}` },
+    ];
+
+    let reply = "";
+    for (let round = 0; round < 3; round++) {
+      const res = await fetch(baseUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${config.ai.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: config.ai.model || "deepseek-v4.1-flash:free",
+          messages,
+          tools: AI_TOOLS,
+          max_tokens: 300,
+        }),
+      });
+      const data = await res.json();
+      const choice = data && data.choices && data.choices[0] && data.choices[0].message;
+      if (!choice) {
+        addLog("[AI] No reply from API:", JSON.stringify((data && data.error) || data).slice(0, 200));
+        return;
+      }
+      if (choice.tool_calls && choice.tool_calls.length) {
+        messages.push(choice);
+        for (const tc of choice.tool_calls) {
+          let args = {};
+          try {
+            args = JSON.parse(tc.function.arguments || "{}");
+          } catch (e) {}
+          const out = await runAiTool(tc.function.name, args);
+          addLog(`[AI] tool ${tc.function.name}(${tc.function.arguments}) -> ${String(out).slice(0, 140)}`);
+          messages.push({ role: "tool", tool_call_id: tc.id, content: String(out) });
+        }
+        continue;
+      }
+      reply = choice.content || "";
+      break;
     }
+
     if (!reply) {
       addLog("[AI] No reply from API");
       return;
