@@ -1853,29 +1853,35 @@ function bedModule(bot, mcData) {
 // Chat module
 // FIX: wire up discord.events.chat flag
 const aiLastReply = new Map();
+const aiConversations = new Set();
+const aiStopRe = /\b(stop|stop it|shut up|stop talking|leave me alone)\b/;
 async function aiReply(bot, username, message) {
   try {
     let question = message.replace(new RegExp(config.ai.trigger, "gi"), "").trim();
     if (!question) question = "hi";
     const persona = config.ai.prompt || "You are a friendly Minecraft player having casual chat in game. Keep replies very short (under 200 characters), playful, no emojis, no markdown.";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.ai.model || "gemini-2.0-flash"}:generateContent?key=${config.ai.apiKey}`;
-    const res = await fetch(url, {
+    const baseUrl = config.ai.baseUrl || "https://opencode.ai/zen/v1/chat/completions";
+    const res = await fetch(baseUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.ai.apiKey}`,
+      },
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                text: `${persona}\nPlayer "${username}" says to you in Minecraft chat: ${question}Your reply:`,
-              },
-            ],
-          },
+        model: config.ai.model || "glm-5.3-flash-free",
+        messages: [
+          { role: "system", content: persona },
+          { role: "user", content: `${username} says to you in Minecraft chat: ${question}` },
         ],
+        max_tokens: 100,
       }),
     });
     const data = await res.json();
-    let reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    let reply = data?.choices?.[0]?.message?.content;
+    if (!reply) {
+      addLog("[AI] No reply from API:", JSON.stringify(data?.error || data).slice(0, 200));
+      return;
+    }
     if (!reply) {
       addLog("[AI] No reply from API");
       return;
@@ -1914,19 +1920,32 @@ function chatModule(bot) {
         }
       }
 
-      // AI responder: reply when someone mentions the bot's name
-      if (
-        config.ai &&
-        config.ai.enabled &&
-        config.ai.apiKey &&
-        lowerMsg.includes(String(config.ai.trigger || "creeperfarm").toLowerCase())
-      ) {
+      // AI responder: reply when tagged, then keep chatting with that
+      // player (no tag needed) until they tell the bot to stop
+      if (config.ai && config.ai.enabled && config.ai.apiKey) {
+        const trigger = String(config.ai.trigger || "creeperfarm").toLowerCase();
         const now = Date.now();
         const last = aiLastReply.get(username) || 0;
         const cooldown = (config.ai.cooldown || 5) * 1000;
-        if (now - last < cooldown) return;
-        aiLastReply.set(username, now);
-        aiReply(bot, username, message);
+        const tagged = lowerMsg.includes(trigger);
+
+        if (aiStopRe.test(lowerMsg) && (tagged || aiConversations.has(username))) {
+          aiConversations.delete(username);
+          addLog(`[AI] Conversation with ${username} ended`);
+          if (tagged) bot.chat(`Okay ${username}, I'll stop listening now.`);
+          return;
+        }
+
+        if (tagged && !aiConversations.has(username)) {
+          aiConversations.add(username);
+          addLog(`[AI] Conversation with ${username} started`);
+        }
+
+        if (tagged || aiConversations.has(username)) {
+          if (now - last < cooldown) return;
+          aiLastReply.set(username, now);
+          aiReply(bot, username, message);
+        }
       }
     } catch (e) {
       addLog("[Chat] Error:", e.message);
