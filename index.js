@@ -1852,11 +1852,48 @@ function bedModule(bot, mcData) {
 
 // Chat module
 // FIX: wire up discord.events.chat flag
+const aiLastReply = new Map();
+async function aiReply(bot, username, message) {
+  try {
+    let question = message.replace(new RegExp(config.ai.trigger, "gi"), "").trim();
+    if (!question) question = "hi";
+    const persona = config.ai.prompt || "You are a friendly Minecraft player having casual chat in game. Keep replies very short (under 200 characters), playful, no emojis, no markdown.";
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.ai.model || "gemini-2.0-flash"}:generateContent?key=${config.ai.apiKey}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: `${persona}\nPlayer "${username}" says to you in Minecraft chat: ${question}Your reply:`,
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    const data = await res.json();
+    let reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!reply) {
+      addLog("[AI] No reply from API");
+      return;
+    }
+    reply = reply.replace(/\*\*|\*|_/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
+    addLog(`[AI] ${username}: "${message}" -> "${reply}"`);
+    bot.chat(reply);
+  } catch (e) {
+    addLog("[AI] Error:", e.message);
+  }
+}
+
 function chatModule(bot) {
   bot.on("chat", (username, message) => {
     if (!bot || username === bot.username) return;
 
     try {
+      const lowerMsg = message.toLowerCase();
       // FIX: send chat events to Discord if enabled
       if (
         config.discord &&
@@ -1868,7 +1905,6 @@ function chatModule(bot) {
       }
 
       if (config.chat && config.chat.respond) {
-        const lowerMsg = message.toLowerCase();
         if (lowerMsg.includes("hello") || lowerMsg.includes("hi")) {
           bot.chat(`Hello, ${username}!`);
         }
@@ -1876,6 +1912,21 @@ function chatModule(bot) {
           const target = message.split(" ")[1];
           if (target) bot.chat(`/tp ${target}`);
         }
+      }
+
+      // AI responder: reply when someone mentions the bot's name
+      if (
+        config.ai &&
+        config.ai.enabled &&
+        config.ai.apiKey &&
+        lowerMsg.includes(String(config.ai.trigger || "creeperfarm").toLowerCase())
+      ) {
+        const now = Date.now();
+        const last = aiLastReply.get(username) || 0;
+        const cooldown = (config.ai.cooldown || 5) * 1000;
+        if (now - last < cooldown) return;
+        aiLastReply.set(username, now);
+        aiReply(bot, username, message);
       }
     } catch (e) {
       addLog("[Chat] Error:", e.message);
