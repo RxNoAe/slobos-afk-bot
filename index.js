@@ -8,6 +8,73 @@ const config = require("./settings.json");
 const express = require("express");
 const http = require("http");
 const https = require("https");
+const { execFile } = require("child_process");
+const fs = require("fs");
+const pathMod = require("path");
+const ffmpeg = require("fluent-ffmpeg");
+ffmpeg.setFfmpegPath(process.env.FFMPEG_PATH || "ffmpeg");
+
+// Simple Voice Chat client (compat v20/v21)
+const { Svc } = require("./lib/svc.js");
+let svcClient = null;
+
+const AUDIO_DIR = pathMod.join(__dirname, "audio");
+const PCM_DIR = pathMod.join(__dirname, "pcm");
+try {
+  process.chdir(__dirname);
+} catch (e) {}
+try {
+  if (!fs.existsSync(AUDIO_DIR)) fs.mkdirSync(AUDIO_DIR, { recursive: true });
+  if (!fs.existsSync(PCM_DIR)) fs.mkdirSync(PCM_DIR, { recursive: true });
+} catch (e) {}
+
+let voiceReady = false;
+let voiceQueue = Promise.resolve();
+
+// Synthesize text to speech with edge-tts and play it into the SVC voice channel
+function speakText(text) {
+  if (!config.voice || !config.voice.enabled) return;
+  if (!svcClient || !svcClient.connected) return;
+  const clean = String(text || "").replace(/["`$\\]/g, "").trim();
+  if (!clean) return;
+
+  voiceQueue = voiceQueue.then(
+    () =>
+      new Promise((resolve) => {
+        const name = `reply_${Date.now()}.mp3`;
+        const out = pathMod.join(AUDIO_DIR, name);
+        const args = [
+          "--voice",
+          config.voice.voice || "en-GB-RyanNeural",
+          "--rate",
+          config.voice.rate || "-6%",
+          "--text",
+          clean,
+          "--write-media",
+          out,
+        ];
+        execFile("edge-tts", args, { timeout: 60000 }, async (err) => {
+          if (err) {
+            addLog("[Voice] TTS error: " + err.message);
+            return resolve();
+          }
+          try {
+            await svcClient.speakFile(out, ffmpeg);
+            addLog(`[Voice] Speaking: "${clean.slice(0, 60)}"`);
+          } catch (e) {
+            addLog("[Voice] speak error: " + e.message);
+          }
+          setTimeout(() => {
+            try {
+              fs.unlinkSync(out);
+            } catch (e) {}
+          }, 30000);
+          resolve();
+        });
+      }),
+  );
+  return voiceQueue;
+}
 
 // ============================================================
 // EXPRESS SERVER - Keep Render/Aternos alive
@@ -1225,6 +1292,21 @@ function createBot() {
 
     bot.loadPlugin(pathfinder);
 
+    if (config.voice && config.voice.enabled) {
+      try {
+        svcClient = new Svc(
+          bot,
+          { ...config.voice, log: (m) => addLog(m) },
+          config.server,
+        );
+        svcClient.start();
+        bot.on("svc_voice", () => {}); // hook for future STT
+        addLog("[SVC] client started");
+      } catch (e) {
+        addLog("[SVC] init error: " + e.message);
+      }
+    }
+
     // FIX: connection timeout - end the old bot before reconnecting to avoid ghost bots
     clearBotTimeouts();
     connectionTimeoutId = setTimeout(() => {
@@ -2014,6 +2096,7 @@ async function aiReply(bot, username, message) {
     aiHistory.set(username, hist);
     addLog(`[AI] ${username}: "${message}" -> "${reply}"`);
     bot.chat(reply);
+    if (config.voice && config.voice.enabled) speakText(reply);
   } catch (e) {
     addLog("[AI] Error:", e.message);
   }
