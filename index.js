@@ -1854,7 +1854,7 @@ function bedModule(bot, mcData) {
 // FIX: wire up discord.events.chat flag
 const aiLastReply = new Map();
 const aiConversations = new Set();
-const aiStopRe = /\b(stop|stop it|shut up|stop talking|leave me alone)\b/;
+const aiStopRe = /\b(stop|stop it|stop talking|stop replying|shut up|shut it|shh|quiet|stfu|leave me alone|go away|enough)\b/;
 async function aiReply(bot, username, message) {
   try {
     let question = message.replace(new RegExp(config.ai.trigger, "gi"), "").trim();
@@ -1932,7 +1932,7 @@ function chatModule(bot) {
         if (aiStopRe.test(lowerMsg) && (tagged || aiConversations.has(username))) {
           aiConversations.delete(username);
           addLog(`[AI] Conversation with ${username} ended`);
-          if (tagged) bot.chat(`Okay ${username}, I'll stop listening now.`);
+          bot.chat(`Okay ${username}, I'll stop listening now.`);
           return;
         }
 
