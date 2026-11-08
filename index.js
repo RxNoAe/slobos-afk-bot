@@ -1854,6 +1854,7 @@ function bedModule(bot, mcData) {
 // FIX: wire up discord.events.chat flag
 const aiLastReply = new Map();
 const aiConversations = new Set();
+const aiHistory = new Map();
 const aiStopRe = /\b(stop|stop it|stop talking|stop replying|shut up|shut it|shh|quiet|stfu|leave me alone|go away|enough)\b/;
 const AI_TOOLS = [
   {
@@ -1959,10 +1960,9 @@ async function aiReply(bot, username, message) {
       (config.ai.prompt || "You are Jarvis, a calm, witty and polite AI assistant. Keep replies short (under 200 characters), plain text, no markdown, no emojis.") +
       " You DO have live internet access via the tools get_time, get_weather and web_search - always call them for time, weather, news or current/factual questions instead of claiming you cannot access the internet.";
     const baseUrl = config.ai.baseUrl || "https://opencode.ai/zen/v1/chat/completions";
-    const messages = [
-      { role: "system", content: persona },
-      { role: "user", content: `${username} says: ${question}` },
-    ];
+    const hist = aiHistory.get(username) || [];
+    const userLine = `${username} says: ${question}`;
+    const messages = [{ role: "system", content: persona }, ...hist, { role: "user", content: userLine }];
 
     let reply = "";
     for (let round = 0; round < 3; round++) {
@@ -2007,6 +2007,11 @@ async function aiReply(bot, username, message) {
       return;
     }
     reply = reply.replace(/\*\*|\*|_/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
+    hist.push({ role: "user", content: userLine });
+    hist.push({ role: "assistant", content: reply });
+    const maxHist = (config.ai.memory || 6) * 2;
+    while (hist.length > maxHist) hist.shift();
+    aiHistory.set(username, hist);
     addLog(`[AI] ${username}: "${message}" -> "${reply}"`);
     bot.chat(reply);
   } catch (e) {
@@ -2051,6 +2056,7 @@ function chatModule(bot) {
 
         if (aiStopRe.test(lowerMsg) && (tagged || aiConversations.has(username))) {
           aiConversations.delete(username);
+          aiHistory.delete(username);
           addLog(`[AI] Conversation with ${username} ended`);
           bot.chat(`Okay ${username}, I'll stop listening now.`);
           return;
