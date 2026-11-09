@@ -1300,7 +1300,10 @@ function createBot() {
           config.server,
         );
         svcClient.start();
-        bot.on("svc_voice", () => {}); // hook for future STT
+        bot.on("svc_transcript", ({ name, text }) => {
+          if (!text) return;
+          bot.emit("chat", name, text);
+        });
         addLog("[SVC] client started");
       } catch (e) {
         addLog("[SVC] init error: " + e.message);
