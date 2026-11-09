@@ -2175,7 +2175,9 @@ function chatModule(bot) {
         const now = Date.now();
         const last = aiLastReply.get(username) || 0;
         const cooldown = (config.ai.cooldown || 5) * 1000;
-        const tagged = lowerMsg.includes(trigger);
+        const triggerAliases = ["jarvis", "jarvus", "jervis", "joris", "garos", "jarves", "jarvs", "darvis", "darrows"];
+        const tagged =
+          lowerMsg.includes(trigger) || triggerAliases.some((a) => lowerMsg.includes(a));
 
         if (aiStopRe.test(lowerMsg) && (tagged || aiConversations.has(username))) {
           aiConversations.delete(username);
