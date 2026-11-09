@@ -43,21 +43,56 @@ function speakText(text) {
       new Promise((resolve) => {
         const name = `reply_${Date.now()}.mp3`;
         const out = pathMod.join(AUDIO_DIR, name);
-        const args = [
-          "--voice",
-          config.voice.voice || "en-GB-RyanNeural",
-          "--rate",
-          config.voice.rate || "-6%",
-          "--text",
-          clean,
-          "--write-media",
-          out,
-        ];
-        execFile("edge-tts", args, { timeout: 60000 }, async (err) => {
-          if (err) {
-            addLog("[Voice] TTS error: " + err.message);
-            return resolve();
+
+        const synth = () => {
+          if (config.voice.ttsApi) {
+            const url =
+              String(config.voice.ttsApi).replace(/\/$/, "") +
+              "/speak?text=" +
+              encodeURIComponent(clean) +
+              "&voice=" +
+              encodeURIComponent(config.voice.ttsVoice || "male1") +
+              "&lang=" +
+              encodeURIComponent(config.voice.ttsLang || "en");
+            fetch(url)
+              .then((r) => {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.arrayBuffer();
+              })
+              .then((ab) => {
+                fs.writeFileSync(out, Buffer.from(ab));
+                done();
+              })
+              .catch((e) => {
+                addLog("[Voice] TTS API error: " + e.message + " - falling back");
+                edgeTts();
+              });
+          } else {
+            edgeTts();
           }
+        };
+
+        const edgeTts = () => {
+          const args = [
+            "--voice",
+            config.voice.voice || "en-GB-RyanNeural",
+            "--rate",
+            config.voice.rate || "-6%",
+            "--text",
+            clean,
+            "--write-media",
+            out,
+          ];
+          execFile("edge-tts", args, { timeout: 60000 }, (err) => {
+            if (err) {
+              addLog("[Voice] TTS error: " + err.message);
+              return resolve();
+            }
+            done();
+          });
+        };
+
+        const done = async () => {
           try {
             await svcClient.speakFile(out, ffmpeg);
             addLog(`[Voice] Speaking: "${clean.slice(0, 60)}"`);
@@ -70,7 +105,9 @@ function speakText(text) {
             } catch (e) {}
           }, 30000);
           resolve();
-        });
+        };
+
+        synth();
       }),
   );
   return voiceQueue;
