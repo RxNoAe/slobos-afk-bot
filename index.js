@@ -8,7 +8,7 @@ const config = require("./settings.json");
 const express = require("express");
 const http = require("http");
 const https = require("https");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const pathMod = require("path");
 const ffmpeg = require("fluent-ffmpeg");
@@ -31,7 +31,40 @@ try {
 let voiceReady = false;
 let voiceQueue = Promise.resolve();
 
-// Synthesize text to speech with edge-tts and play it into the SVC voice channel
+// Stream an audio stream (mp3/wav) into the voice chat as PCM frames.
+function streamAudioToVoice(input, inputFormat, onFirst) {
+  return new Promise((resolve) => {
+    const frameBytes = 1920; // 20ms mono s16le @48k
+    let acc = Buffer.alloc(0);
+    let first = true;
+    const cmd = ffmpeg(input);
+    if (inputFormat) cmd.inputFormat(inputFormat);
+    const out = cmd
+      .audioCodec("pcm_s16le")
+      .format("s16le")
+      .audioChannels(1)
+      .audioFrequency(48000)
+      .on("error", (e) => {
+        addLog("[Voice] ffmpeg error: " + e.message);
+        resolve();
+      })
+      .pipe();
+    out.on("data", (chunk) => {
+      acc = Buffer.concat([acc, chunk]);
+      while (acc.length >= frameBytes) {
+        if (first) {
+          first = false;
+          if (onFirst) onFirst();
+        }
+        svcClient.pushFrame(acc.subarray(0, frameBytes));
+        acc = acc.subarray(frameBytes);
+      }
+    });
+    out.on("end", () => resolve());
+  });
+}
+
+// Synthesize text to speech and stream it into the SVC voice channel (low latency)
 function speakText(text) {
   if (!config.voice || !config.voice.enabled) return;
   if (!svcClient || !svcClient.connected) return;
@@ -41,73 +74,69 @@ function speakText(text) {
   voiceQueue = voiceQueue.then(
     () =>
       new Promise((resolve) => {
-        const name = `reply_${Date.now()}.mp3`;
-        const out = pathMod.join(AUDIO_DIR, name);
-
-        const synth = () => {
-          if (config.voice.ttsApi) {
-            const url =
-              String(config.voice.ttsApi).replace(/\/$/, "") +
-              "/speak?text=" +
-              encodeURIComponent(clean) +
-              "&voice=" +
-              encodeURIComponent(config.voice.ttsVoice || "male1") +
-              "&lang=" +
-              encodeURIComponent(config.voice.ttsLang || "en");
-            fetch(url)
-              .then((r) => {
-                if (!r.ok) throw new Error("HTTP " + r.status);
-                return r.arrayBuffer();
-              })
-              .then((ab) => {
-                fs.writeFileSync(out, Buffer.from(ab));
-                done();
-              })
-              .catch((e) => {
-                addLog("[Voice] TTS API error: " + e.message + " - falling back");
-                edgeTts();
-              });
-          } else {
-            edgeTts();
-          }
-        };
-
-        const edgeTts = () => {
-          const args = [
-            "--voice",
-            config.voice.voice || "en-GB-RyanNeural",
-            "--rate",
-            config.voice.rate || "-6%",
-            "--text",
-            clean,
-            "--write-media",
-            out,
-          ];
-          execFile("edge-tts", args, { timeout: 60000 }, (err) => {
-            if (err) {
-              addLog("[Voice] TTS error: " + err.message);
-              return resolve();
-            }
-            done();
-          });
-        };
-
-        const done = async () => {
-          try {
-            await svcClient.speakFile(out, ffmpeg);
-            addLog(`[Voice] Speaking: "${clean.slice(0, 60)}"`);
-          } catch (e) {
-            addLog("[Voice] speak error: " + e.message);
-          }
-          setTimeout(() => {
-            try {
-              fs.unlinkSync(out);
-            } catch (e) {}
-          }, 30000);
+        const started = Date.now();
+        const firstFrame = () =>
+          addLog(`[Voice] first audio after ${Date.now() - started}ms`);
+        const done = () => {
+          addLog(
+            `[Voice] Speaking (${Date.now() - started}ms setup): "${clean.slice(0, 50)}"`,
+          );
           resolve();
         };
 
-        synth();
+        if (config.voice.ttsApi) {
+          const url =
+            String(config.voice.ttsApi).replace(/\/$/, "") +
+            "/speak?text=" +
+            encodeURIComponent(clean) +
+            "&voice=" +
+            encodeURIComponent(config.voice.ttsVoice || "male1") +
+            "&lang=" +
+            encodeURIComponent(config.voice.ttsLang || "en");
+          fetch(url)
+            .then((r) => {
+              if (!r.ok) throw new Error("HTTP " + r.status);
+              return r.arrayBuffer();
+            })
+            .then((ab) => {
+              const { Readable } = require("stream");
+              return streamAudioToVoice(Readable.from(Buffer.from(ab)), null, firstFrame);
+            })
+            .then(done)
+            .catch((e) => {
+              addLog("[Voice] TTS API error: " + e.message + " - falling back");
+              edgeTts(true);
+            });
+        } else {
+          edgeTts(false);
+        }
+
+        // Stream edge-tts output straight into ffmpeg (no full-file wait)
+        function edgeTts() {
+          const proc = spawn(
+            "edge-tts",
+            [
+              "--voice",
+              config.voice.voice || "en-GB-RyanNeural",
+              "--rate",
+              config.voice.rate || "-6%",
+              "--text",
+              clean,
+              "--write-media",
+              "-",
+            ],
+            { stdio: ["ignore", "pipe", "ignore"] },
+          );
+          let failed = false;
+          proc.on("error", (e) => {
+            failed = true;
+            addLog("[Voice] TTS error: " + e.message);
+            resolve();
+          });
+          streamAudioToVoice(proc.stdout, "mp3", firstFrame).then(() => {
+            if (!failed) done();
+          });
+        }
       }),
   );
   return voiceQueue;
