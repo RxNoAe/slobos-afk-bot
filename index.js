@@ -2098,7 +2098,7 @@ async function aiReply(bot, username, message) {
           model: config.ai.model || "deepseek-v4.1-flash:free",
           messages,
           tools: AI_TOOLS,
-          max_tokens: 300,
+          max_tokens: 700,
         }),
       });
       const data = await res.json();
