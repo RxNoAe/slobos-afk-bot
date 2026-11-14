@@ -45,7 +45,8 @@ function streamAudioToVoice(input, inputFormat, onFirst) {
       .audioChannels(1)
       .audioFrequency(48000)
       .on("error", (e) => {
-        addLog("[Voice] ffmpeg error: " + e.message);
+        if (!/Output stream closed|EPIPE/i.test(e.message))
+          addLog("[Voice] ffmpeg error: " + e.message);
         resolve();
       })
       .pipe();
@@ -75,6 +76,7 @@ function speakText(text) {
     () =>
       new Promise((resolve) => {
         const started = Date.now();
+        if (svcClient && svcClient.noteSpoken) svcClient.noteSpoken(clean);
         const firstFrame = () =>
           addLog(`[Voice] first audio after ${Date.now() - started}ms`);
         const done = () => {
