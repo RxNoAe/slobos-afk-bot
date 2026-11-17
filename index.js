@@ -2174,6 +2174,40 @@ async function aiReply(bot, username, message, viaTell) {
   }
 }
 
+// Deterministic instruction parser: "say hi to X", "tell X ...", "say ..."
+function parseDirective(raw) {
+  let msg = String(raw || "").trim();
+  msg = msg
+    .replace(
+      /^[,!\s]*(jarvis|jarvus|jervis|joris|garos|jarves|jarvs|darvis|darrows)\b[,!:.\s]*/i,
+      "",
+    )
+    .trim();
+  let m;
+
+  // say hi / hello / hey to <player>
+  m = msg.match(/^say\s+(hi|hello|hey)\s+to\s+([A-Za-z0-9_]{2,16})\b[.!]*$/i);
+  if (m) return { type: "chat", text: `Hi ${m[2]}!` };
+
+  // tell <player> <message>
+  m = msg.match(/^tell\s+([A-Za-z0-9_]{2,16})\s*[:,]?\s+(.+)$/i);
+  if (m) {
+    const reserved = /^(me|us|him|her|them|it|a|an|the|about|of|that|this|you)$/i;
+    const rest = m[2].trim();
+    if (!reserved.test(m[1]) && rest) return { type: "tell", target: m[1], text: rest };
+  }
+
+  // whisper/msg/dm <player> <message>
+  m = msg.match(/^(?:whisper|msg|dm)\s+([A-Za-z0-9_]{2,16})\s*[:,]?\s+(.+)$/i);
+  if (m) return { type: "tell", target: m[1], text: m[2].trim() };
+
+  // say <text>  -> say it verbatim in public chat
+  m = msg.match(/^say\s+(.+)$/i);
+  if (m) return { type: "chat", text: m[1].trim() };
+
+  return null;
+}
+
 function handleIncoming(bot, username, message, viaTell) {
   if (!bot || username === bot.username) return;
   try {
@@ -2227,6 +2261,20 @@ function handleIncoming(bot, username, message, viaTell) {
       }
 
       if (tagged || aiConversations.has(username)) {
+        // Explicit instructions: say / say hi to / tell <player>
+        const directive = parseDirective(message);
+        if (directive) {
+          if (directive.type === "tell") {
+            bot.chat(`/tell ${directive.target} ${directive.text}`);
+            addLog(`[Say] /tell ${directive.target}: ${directive.text}`);
+          } else {
+            bot.chat(directive.text);
+            addLog(`[Say] ${directive.text}`);
+          }
+          if (config.voice && config.voice.enabled) speakText(directive.text);
+          return;
+        }
+
         if (now - last < cooldown) return;
         aiLastReply.set(username, now);
         aiReply(bot, username, message, viaTell);
