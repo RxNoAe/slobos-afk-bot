@@ -2105,7 +2105,7 @@ async function runAiTool(name, args) {
   }
 }
 
-async function aiReply(bot, username, message) {
+async function aiReply(bot, username, message, viaTell) {
   try {
     let question = message.replace(new RegExp(config.ai.trigger, "gi"), "").trim();
     if (!question) question = "hi";
@@ -2166,73 +2166,81 @@ async function aiReply(bot, username, message) {
     while (hist.length > maxHist) hist.shift();
     aiHistory.set(username, hist);
     addLog(`[AI] ${username}: "${message}" -> "${reply}"`);
-    bot.chat(reply);
+    if (viaTell) bot.chat(`/tell ${username} ${reply}`);
+    else bot.chat(reply);
     if (config.voice && config.voice.enabled) speakText(reply);
   } catch (e) {
     addLog("[AI] Error:", e.message);
   }
 }
 
-function chatModule(bot) {
-  bot.on("chat", (username, message) => {
-    if (!bot || username === bot.username) return;
+function handleIncoming(bot, username, message, viaTell) {
+  if (!bot || username === bot.username) return;
+  try {
+    const lowerMsg = message.toLowerCase();
 
-    try {
-      const lowerMsg = message.toLowerCase();
-      // FIX: send chat events to Discord if enabled
-      if (
-        config.discord &&
-        config.discord.enabled &&
-        config.discord.events &&
-        config.discord.events.chat
-      ) {
-        sendDiscordWebhook(`💬 **${username}**: ${message}`, 0x7289da);
-      }
-
-      if (config.chat && config.chat.respond) {
-        if (lowerMsg.includes("hello") || lowerMsg.includes("hi")) {
-          bot.chat(`Hello, ${username}!`);
-        }
-        if (message.startsWith("!tp ")) {
-          const target = message.split(" ")[1];
-          if (target) bot.chat(`/tp ${target}`);
-        }
-      }
-
-      // AI responder: reply when tagged, then keep chatting with that
-      // player (no tag needed) until they tell the bot to stop
-      if (config.ai && config.ai.enabled && config.ai.apiKey) {
-        const trigger = String(config.ai.trigger || "creeperfarm").toLowerCase();
-        const now = Date.now();
-        const last = aiLastReply.get(username) || 0;
-        const cooldown = (config.ai.cooldown || 5) * 1000;
-        const triggerAliases = ["jarvis", "jarvus", "jervis", "joris", "garos", "jarves", "jarvs", "darvis", "darrows"];
-        const tagged =
-          lowerMsg.includes(trigger) || triggerAliases.some((a) => lowerMsg.includes(a));
-
-        if (aiStopRe.test(lowerMsg) && (tagged || aiConversations.has(username))) {
-          aiConversations.delete(username);
-          aiHistory.delete(username);
-          addLog(`[AI] Conversation with ${username} ended`);
-          bot.chat(`Okay ${username}, I'll stop listening now.`);
-          return;
-        }
-
-        if (tagged && !aiConversations.has(username)) {
-          aiConversations.add(username);
-          addLog(`[AI] Conversation with ${username} started`);
-        }
-
-        if (tagged || aiConversations.has(username)) {
-          if (now - last < cooldown) return;
-          aiLastReply.set(username, now);
-          aiReply(bot, username, message);
-        }
-      }
-    } catch (e) {
-      addLog("[Chat] Error:", e.message);
+    if (
+      config.discord &&
+      config.discord.enabled &&
+      config.discord.events &&
+      config.discord.events.chat
+    ) {
+      sendDiscordWebhook(`\u{1F4AC} **${username}**: ${message}`, 0x7289da);
     }
-  });
+
+    if (config.chat && config.chat.respond) {
+      if (lowerMsg.includes("hello") || lowerMsg.includes("hi")) {
+        bot.chat(`Hello, ${username}!`);
+      }
+      if (message.startsWith("!tp ")) {
+        const target = message.split(" ")[1];
+        if (target) bot.chat(`/tp ${target}`);
+      }
+    }
+
+    // AI responder. Reply when tagged (chat), or always for /tell whispers,
+    // then keep chatting with that player until they tell the bot to stop.
+    if (config.ai && config.ai.enabled && config.ai.apiKey) {
+      const trigger = String(config.ai.trigger || "creeperfarm").toLowerCase();
+      const now = Date.now();
+      const last = aiLastReply.get(username) || 0;
+      const cooldown = (config.ai.cooldown || 5) * 1000;
+      const triggerAliases = ["jarvis", "jarvus", "jervis", "joris", "garos", "jarves", "jarvs", "darvis", "darrows"];
+      const tagged =
+        viaTell ||
+        lowerMsg.includes(trigger) ||
+        triggerAliases.some((a) => lowerMsg.includes(a));
+      const reply = (t) =>
+        viaTell ? bot.chat(`/tell ${username} ${t}`) : bot.chat(t);
+
+      if (aiStopRe.test(lowerMsg) && (tagged || aiConversations.has(username))) {
+        aiConversations.delete(username);
+        aiHistory.delete(username);
+        addLog(`[AI] Conversation with ${username} ended`);
+        reply(`Okay ${username}, I'll stop listening now.`);
+        return;
+      }
+
+      if (tagged && !aiConversations.has(username)) {
+        aiConversations.add(username);
+        addLog(`[AI] Conversation with ${username} started`);
+      }
+
+      if (tagged || aiConversations.has(username)) {
+        if (now - last < cooldown) return;
+        aiLastReply.set(username, now);
+        aiReply(bot, username, message, viaTell);
+      }
+    }
+  } catch (e) {
+    addLog("[Chat] Error: " + e.message);
+  }
+}
+
+function chatModule(bot) {
+  bot.on("chat", (username, message) => handleIncoming(bot, username, message, false));
+  // /tell, /msg, /w whispers arrive as "whisper" events in mineflayer
+  bot.on("whisper", (username, message) => handleIncoming(bot, username, message, true));
 }
 
 // ============================================================
